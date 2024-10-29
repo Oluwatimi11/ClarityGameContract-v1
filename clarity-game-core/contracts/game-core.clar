@@ -1,11 +1,7 @@
-
 ;; title: game-core
-;; version:
-;; summary:
-;; description:
-
-;; Action Game Smart Contract v2.0
-;; Enhanced with robust error handling and input validation
+;; version: 2.0
+;; summary: Action Game Smart Contract with Enhanced Features
+;; description: Implements character management, combat, equipment, and guild systems
 
 ;; Constants for game configuration
 (define-constant MAX-GUILD-NAME-LENGTH u24)
@@ -35,6 +31,7 @@
 (define-constant ERR-INVALID-AMOUNT (err u114))
 (define-constant ERR-INACTIVE-CHARACTER (err u115))
 (define-constant ERR-INACTIVE-GUILD (err u116))
+(define-constant ERR-INSUFFICIENT-STATS (err u117))
 
 ;; Principal Variables with Access Control
 (define-data-var contract-administrator principal tx-sender)
@@ -60,7 +57,7 @@
   }
 )
 
-;; Equipment System with Enhanced Validation
+;; Equipment System
 (define-map equipment-inventory uint 
   {
     equipment-name: (string-ascii 24),
@@ -81,7 +78,7 @@
   }
 )
 
-;; Guild System with Enhanced Features
+;; Guild System
 (define-map guild-data (string-ascii 24)
   {
     guild-master: principal,
@@ -98,6 +95,15 @@
     is-guild-active: bool,
     guild-achievement-score: uint,
     guild-description: (string-ascii 256)
+  }
+)
+
+;; Guild Members Map
+(define-map guild-members principal
+  {
+    guild-name: (string-ascii 24),
+    contribution-points: uint,
+    last-contribution-time: uint
   }
 )
 
@@ -201,25 +207,21 @@
   )
 )
 
-;; Enhanced Combat System
+;; Fixed Combat System
 (define-public (initiate-combat (opponent principal))
   (let (
     (attacker-data (unwrap! (map-get? character-profiles tx-sender) ERR-CHARACTER-NOT-FOUND))
     (defender-data (unwrap! (map-get? character-profiles opponent) ERR-CHARACTER-NOT-FOUND))
-    (current-block (unwrap! block-height u0))
   )
     ;; Comprehensive validation
     (asserts! (check-character-active tx-sender) ERR-INACTIVE-CHARACTER)
     (asserts! (check-character-active opponent) ERR-INACTIVE-CHARACTER)
-    (asserts! (> (- current-block (get last-combat-timestamp attacker-data)) COOLDOWN-BLOCKS) ERR-COOLDOWN-ACTIVE)
+    (asserts! (> (- block-height (get last-combat-timestamp attacker-data)) COOLDOWN-BLOCKS) ERR-COOLDOWN-ACTIVE)
     (asserts! (>= (get health-points attacker-data) u100) ERR-INSUFFICIENT-STATS)
     
     ;; Update combat timestamp
     (ok (map-set character-profiles tx-sender 
-      (merge attacker-data {
-        last-combat-timestamp: current-block,
-        last-active-timestamp: current-block
-      })
+      (merge attacker-data {last-combat-timestamp: block-height})
     ))
   )
 )
@@ -227,30 +229,16 @@
 ;; Safe Guild Contribution System
 (define-public (contribute-to-guild (amount uint))
   (let (
-    (member-data (unwrap! (map-get? guild-members tx-sender) ERR-GUILD-NOT-FOUND))
-    (guild-name (get guild-name member-data))
-    (guild (unwrap! (map-get? guild-data guild-name) ERR-GUILD-NOT-FOUND))
+    (guild-member-data (unwrap! (map-get? guild-members tx-sender) ERR-CHARACTER-NOT-FOUND))
+    (guild-name (get guild-name guild-member-data))
+    (guild-info (unwrap! (map-get? guild-data guild-name) ERR-GUILD-NOT-FOUND))
   )
-    ;; Input validation
+    ;; Validation
     (asserts! (validate-amount amount) ERR-INVALID-AMOUNT)
-    (asserts! (get is-guild-active guild) ERR-INACTIVE-GUILD)
-    (asserts! (check-character-active tx-sender) ERR-INACTIVE-CHARACTER)
     
-    ;; Update contribution safely
-    (try! (map-set guild-members tx-sender 
-      (merge member-data {
-        contribution-points: (+ (get contribution-points member-data) amount),
-        last-contribution-time: block-height
-      })
-    ))
-    
-    ;; Update guild data safely
+    ;; Update guild funds
     (ok (map-set guild-data guild-name 
-      (merge guild {
-        guild-funds: (+ (get guild-funds guild) amount),
-        guild-experience: (+ (get guild-experience guild) (* amount u10)),
-        last-active-time: block-height
-      })
+      (merge guild-info {guild-funds: (+ (get guild-funds guild-info) amount)})
     ))
   )
 )
@@ -268,15 +256,6 @@
   (match (map-get? character-profiles player)
     character-data (if (get is-character-active character-data)
                     (some character-data)
-                    none)
-    none
-  )
-)
-
-(define-read-only (get-guild-details (guild-name (string-ascii 24)))
-  (match (map-get? guild-data guild-name)
-    guild-data (if (get is-guild-active guild-data)
-                    (some guild-data)
                     none)
     none
   )
