@@ -4,14 +4,43 @@
 ;; summary:
 ;; description:
 
-;; Action Game Smart Contract
-;; Manages character stats, combat mechanics, and item equipment
+;; Action Game Smart Contract v2.0
+;; Enhanced with robust error handling and input validation
 
-;; Principal Variables
+;; Constants for game configuration
+(define-constant MAX-GUILD-NAME-LENGTH u24)
+(define-constant MAX-CHARACTER-NAME-LENGTH u24)
+(define-constant MIN-GUILD-LEVEL-REQUIREMENT u10)
+(define-constant MAX-GUILD-MEMBERS u100)
+(define-constant MIN-CONTRIBUTION-AMOUNT u1)
+(define-constant GUILD-CREATION-COST u1000)
+(define-constant EXPERIENCE-PER-LEVEL u1000)
+(define-constant COOLDOWN-BLOCKS u10)
+
+;; Error Constants
+(define-constant ERR-UNAUTHORIZED (err u100))
+(define-constant ERR-INVALID-INPUT (err u101))
+(define-constant ERR-CHARACTER-EXISTS (err u102))
+(define-constant ERR-CHARACTER-NOT-FOUND (err u103))
+(define-constant ERR-EQUIPMENT-NOT-FOUND (err u104))
+(define-constant ERR-INSUFFICIENT-LEVEL (err u105))
+(define-constant ERR-COOLDOWN-ACTIVE (err u106))
+(define-constant ERR-INSUFFICIENT-FUNDS (err u107))
+(define-constant ERR-GUILD-EXISTS (err u108))
+(define-constant ERR-GUILD-NOT-FOUND (err u109))
+(define-constant ERR-NOT-GUILD-MASTER (err u110))
+(define-constant ERR-ALREADY-IN-GUILD (err u111))
+(define-constant ERR-GUILD-FULL (err u112))
+(define-constant ERR-INVALID-NAME (err u113))
+(define-constant ERR-INVALID-AMOUNT (err u114))
+(define-constant ERR-INACTIVE-CHARACTER (err u115))
+(define-constant ERR-INACTIVE-GUILD (err u116))
+
+;; Principal Variables with Access Control
 (define-data-var contract-administrator principal tx-sender)
-(define-data-var game-balance uint u0)
+(define-map administrators principal bool)
 
-;; Character Stats Structure
+;; Character Profile Structure
 (define-map character-profiles principal 
   {
     character-name: (string-ascii 24),
@@ -25,74 +54,100 @@
     skill-points: uint,
     achievement-score: uint,
     last-combat-timestamp: uint,
+    creation-timestamp: uint,
+    last-active-timestamp: uint,
     is-character-active: bool
   }
 )
 
-;; Equipment Types
+;; Equipment System with Enhanced Validation
 (define-map equipment-inventory uint 
   {
     equipment-name: (string-ascii 24),
-    equipment-type: (string-ascii 16), ;; weapon, armor, accessory
-    equipment-rarity: (string-ascii 12), ;; common, rare, epic, legendary
+    equipment-type: (string-ascii 16),
+    equipment-rarity: (string-ascii 12),
     attack-power: uint,
     defense-power: uint,
     magic-power: uint,
     durability: uint,
+    max-durability: uint,
     level-requirement: uint,
+    class-requirement: (optional (string-ascii 16)),
     equipment-owner: (optional principal),
     is-equipment-tradeable: bool,
+    is-equipment-bound: bool,
     creation-timestamp: uint,
     last-modified-timestamp: uint
   }
 )
 
-;; Combat Stats
-(define-map combat-statistics principal 
+;; Guild System with Enhanced Features
+(define-map guild-data (string-ascii 24)
   {
-    total-battles: uint,
-    battles-won: uint,
-    battles-lost: uint,
-    enemies-defeated: uint,
-    critical-hits: uint,
-    damage-dealt: uint,
-    damage-taken: uint,
-    highest-combo: uint,
-    longest-survival-time: uint
+    guild-master: principal,
+    guild-officers: (list 5 principal),
+    guild-level: uint,
+    guild-experience: uint,
+    member-count: uint,
+    max-members: uint,
+    guild-funds: uint,
+    minimum-level-requirement: uint,
+    guild-creation-time: uint,
+    last-active-time: uint,
+    guild-banner: (string-ascii 24),
+    is-guild-active: bool,
+    guild-achievement-score: uint,
+    guild-description: (string-ascii 256)
   }
 )
 
-;; Achievement System
-(define-map player-achievements principal 
-  {
-    achievement-points: uint,
-    rare-items-found: uint,
-    boss-monsters-defeated: uint,
-    perfect-combos-performed: uint,
-    dungeons-cleared: uint
-  }
+;; Private Functions for Input Validation
+(define-private (validate-name (name (string-ascii 24)))
+  (and
+    (> (len name) u0)
+    (<= (len name) MAX-CHARACTER-NAME-LENGTH)
+    (is-eq (index-of name " ") none)  ;; No spaces allowed
+  )
 )
 
-;; System Variables
-(define-data-var next-equipment-id uint u1)
-(define-data-var global-difficulty-modifier uint u100)
-(define-data-var season-number uint u1)
+(define-private (validate-amount (amount uint))
+  (and
+    (>= amount MIN-CONTRIBUTION-AMOUNT)
+    (<= amount u1000000000)  ;; Reasonable upper limit
+  )
+)
 
-;; Error Constants
-(define-constant ERR-UNAUTHORIZED-ACCESS (err u100))
-(define-constant ERR-CHARACTER-EXISTS (err u101))
-(define-constant ERR-CHARACTER-NOT-FOUND (err u102))
-(define-constant ERR-EQUIPMENT-NOT-FOUND (err u103))
-(define-constant ERR-INSUFFICIENT-LEVEL (err u104))
-(define-constant ERR-COMBAT-COOLDOWN (err u105))
-(define-constant ERR-INSUFFICIENT-STATS (err u106))
+(define-private (validate-guild-name (name (string-ascii 24)))
+  (and
+    (validate-name name)
+    (is-none (map-get? guild-data name))
+  )
+)
 
-;; Character Management Functions
+(define-private (is-administrator (user principal))
+  (or
+    (is-eq user (var-get contract-administrator))
+    (default-to false (map-get? administrators user))
+  )
+)
+
+(define-private (check-character-active (character principal))
+  (match (map-get? character-profiles character)
+    character-data (get is-character-active character-data)
+    false
+  )
+)
+
+;; Enhanced Character Creation with Validation
 (define-public (create-character 
     (character-name (string-ascii 24))
     (character-class (string-ascii 16)))
-  (let ((existing-character (map-get? character-profiles tx-sender)))
+  (let (
+    (existing-character (map-get? character-profiles tx-sender))
+  )
+    (asserts! (validate-name character-name) ERR-INVALID-NAME)
     (asserts! (is-none existing-character) ERR-CHARACTER-EXISTS)
+    
     (ok (map-set character-profiles tx-sender {
       character-name: character-name,
       character-class: character-class,
@@ -105,131 +160,124 @@
       skill-points: u0,
       achievement-score: u0,
       last-combat-timestamp: u0,
+      creation-timestamp: block-height,
+      last-active-timestamp: block-height,
       is-character-active: true
     }))
   )
 )
 
-;; Combat System Functions
+;; Enhanced Guild Creation with Validation
+(define-public (create-guild
+    (guild-name (string-ascii 24))
+    (guild-banner (string-ascii 24))
+    (guild-description (string-ascii 256)))
+  (let (
+    (character-data (unwrap! (map-get? character-profiles tx-sender) ERR-CHARACTER-NOT-FOUND))
+  )
+    ;; Input validation
+    (asserts! (validate-guild-name guild-name) ERR-INVALID-NAME)
+    (asserts! (validate-name guild-banner) ERR-INVALID-NAME)
+    (asserts! (>= (get character-level character-data) MIN-GUILD-LEVEL-REQUIREMENT) ERR-INSUFFICIENT-LEVEL)
+    (asserts! (check-character-active tx-sender) ERR-INACTIVE-CHARACTER)
+    
+    ;; Create guild with enhanced data
+    (ok (map-set guild-data guild-name {
+      guild-master: tx-sender,
+      guild-officers: (list tx-sender),
+      guild-level: u1,
+      guild-experience: u0,
+      member-count: u1,
+      max-members: MAX-GUILD-MEMBERS,
+      guild-funds: u0,
+      minimum-level-requirement: u5,
+      guild-creation-time: block-height,
+      last-active-time: block-height,
+      guild-banner: guild-banner,
+      is-guild-active: true,
+      guild-achievement-score: u0,
+      guild-description: guild-description
+    }))
+  )
+)
+
+;; Enhanced Combat System
 (define-public (initiate-combat (opponent principal))
   (let (
     (attacker-data (unwrap! (map-get? character-profiles tx-sender) ERR-CHARACTER-NOT-FOUND))
     (defender-data (unwrap! (map-get? character-profiles opponent) ERR-CHARACTER-NOT-FOUND))
-    (current-time (unwrap! block-height u0))
+    (current-block (unwrap! block-height u0))
   )
-    (asserts! (> (- current-time (get last-combat-timestamp attacker-data)) u10) ERR-COMBAT-COOLDOWN)
-    (asserts! (>= (get combat-power attacker-data) u50) ERR-INSUFFICIENT-STATS)
+    ;; Comprehensive validation
+    (asserts! (check-character-active tx-sender) ERR-INACTIVE-CHARACTER)
+    (asserts! (check-character-active opponent) ERR-INACTIVE-CHARACTER)
+    (asserts! (> (- current-block (get last-combat-timestamp attacker-data)) COOLDOWN-BLOCKS) ERR-COOLDOWN-ACTIVE)
+    (asserts! (>= (get health-points attacker-data) u100) ERR-INSUFFICIENT-STATS)
     
-    ;; Combat resolution logic here
+    ;; Update combat timestamp
     (ok (map-set character-profiles tx-sender 
       (merge attacker-data {
-        last-combat-timestamp: current-time
+        last-combat-timestamp: current-block,
+        last-active-timestamp: current-block
       })
     ))
   )
 )
 
-;; Equipment Management
-(define-public (create-equipment (
-    equipment-name (string-ascii 24))
-    (equipment-type (string-ascii 16))
-    (equipment-rarity (string-ascii 12))
-    (attack-power uint)
-    (defense-power uint)
-    (level-requirement uint))
+;; Safe Guild Contribution System
+(define-public (contribute-to-guild (amount uint))
+  (let (
+    (member-data (unwrap! (map-get? guild-members tx-sender) ERR-GUILD-NOT-FOUND))
+    (guild-name (get guild-name member-data))
+    (guild (unwrap! (map-get? guild-data guild-name) ERR-GUILD-NOT-FOUND))
+  )
+    ;; Input validation
+    (asserts! (validate-amount amount) ERR-INVALID-AMOUNT)
+    (asserts! (get is-guild-active guild) ERR-INACTIVE-GUILD)
+    (asserts! (check-character-active tx-sender) ERR-INACTIVE-CHARACTER)
+    
+    ;; Update contribution safely
+    (try! (map-set guild-members tx-sender 
+      (merge member-data {
+        contribution-points: (+ (get contribution-points member-data) amount),
+        last-contribution-time: block-height
+      })
+    ))
+    
+    ;; Update guild data safely
+    (ok (map-set guild-data guild-name 
+      (merge guild {
+        guild-funds: (+ (get guild-funds guild) amount),
+        guild-experience: (+ (get guild-experience guild) (* amount u10)),
+        last-active-time: block-height
+      })
+    ))
+  )
+)
+
+;; Administrative Functions with Access Control
+(define-public (set-administrator (admin principal) (status bool))
   (begin
-    (asserts! (is-eq tx-sender (var-get contract-administrator)) ERR-UNAUTHORIZED-ACCESS)
-    (let ((equipment-id (var-get next-equipment-id)))
-      (map-set equipment-inventory equipment-id {
-        equipment-name: equipment-name,
-        equipment-type: equipment-type,
-        equipment-rarity: equipment-rarity,
-        attack-power: attack-power,
-        defense-power: defense-power,
-        magic-power: u0,
-        durability: u100,
-        level-requirement: level-requirement,
-        equipment-owner: none,
-        is-equipment-tradeable: true,
-        creation-timestamp: block-height,
-        last-modified-timestamp: block-height
-      })
-      (var-set next-equipment-id (+ equipment-id u1))
-      (ok equipment-id)
-    )
+    (asserts! (is-eq tx-sender (var-get contract-administrator)) ERR-UNAUTHORIZED)
+    (ok (map-set administrators admin status))
   )
 )
 
-;; Character Progression
-(define-public (gain-combat-experience (experience-gained uint))
-  (let (
-    (character-data (unwrap! (map-get? character-profiles tx-sender) ERR-CHARACTER-NOT-FOUND))
-    (current-experience (get experience-points character-data))
-    (new-experience (+ current-experience experience-gained))
-    (level-threshold (* (get character-level character-data) u1000))
-  )
-    (if (>= new-experience level-threshold)
-      (ok (map-set character-profiles tx-sender 
-        (merge character-data {
-          character-level: (+ (get character-level character-data) u1),
-          experience-points: (- new-experience level-threshold),
-          skill-points: (+ (get skill-points character-data) u1),
-          health-points: (+ (get health-points character-data) u100),
-          mana-points: (+ (get mana-points character-data) u50),
-          combat-power: (+ (get combat-power character-data) u10)
-        })))
-      (ok (map-set character-profiles tx-sender 
-        (merge character-data {
-          experience-points: new-experience
-        })))
-    )
+;; Enhanced Read-only Functions
+(define-read-only (get-character-details (player principal))
+  (match (map-get? character-profiles player)
+    character-data (if (get is-character-active character-data)
+                    (some character-data)
+                    none)
+    none
   )
 )
 
-;; Achievement Tracking
-(define-public (update-combat-statistics (
-    enemies-defeated uint)
-    (damage-dealt uint)
-    (damage-taken uint)
-    (combo-count uint))
-  (let (
-    (stats (default-to 
-      {
-        total-battles: u0,
-        battles-won: u0,
-        battles-lost: u0,
-        enemies-defeated: u0,
-        critical-hits: u0,
-        damage-dealt: u0,
-        damage-taken: u0,
-        highest-combo: u0,
-        longest-survival-time: u0
-      }
-      (map-get? combat-statistics tx-sender)
-    )))
-    (ok (map-set combat-statistics tx-sender 
-      (merge stats {
-        total-battles: (+ (get total-battles stats) u1),
-        enemies-defeated: (+ (get enemies-defeated stats) enemies-defeated),
-        damage-dealt: (+ (get damage-dealt stats) damage-dealt),
-        damage-taken: (+ (get damage-taken stats) damage-taken),
-        highest-combo: (if (> combo-count (get highest-combo stats))
-          combo-count
-          (get highest-combo stats))
-      })
-    ))
+(define-read-only (get-guild-details (guild-name (string-ascii 24)))
+  (match (map-get? guild-data guild-name)
+    guild-data (if (get is-guild-active guild-data)
+                    (some guild-data)
+                    none)
+    none
   )
-)
-
-;; Read-only Functions
-(define-read-only (get-character-profile (player principal))
-  (map-get? character-profiles player)
-)
-
-(define-read-only (get-equipment-details (equipment-id uint))
-  (map-get? equipment-inventory equipment-id)
-)
-
-(define-read-only (get-combat-stats (player principal))
-  (map-get? combat-statistics player)
 )
